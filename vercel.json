@@ -3,8 +3,11 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "functions": {
-    "api/audio.ts": {
-      "maxDuration": 60
+    "api/search.ts": {
+      "maxDuration": 30
+    },
+    "api/transcript.ts": {
+      "maxDuration": 30
     }
   }
 }
