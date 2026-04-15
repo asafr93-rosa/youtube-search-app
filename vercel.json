@@ -8,6 +8,9 @@
     },
     "api/transcript.ts": {
       "maxDuration": 30
+    },
+    "api/whisper.ts": {
+      "maxDuration": 60
     }
   }
 }
