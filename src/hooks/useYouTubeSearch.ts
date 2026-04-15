@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react'
-import yts from 'yt-search'
 
 export interface VideoResult {
   videoId: string
@@ -37,19 +36,12 @@ export function useYouTubeSearch(query: string): UseYouTubeSearchReturn {
       setLoading(true)
       setError(null)
       try {
-        const result = await yts(query)
-        setVideos(
-          result.videos.slice(0, 20).map((v) => ({
-            videoId: v.videoId,
-            title: v.title,
-            url: v.url,
-            thumbnail: v.thumbnail ?? '',
-            author: v.author.name,
-            duration: v.timestamp,
-          }))
-        )
-      } catch {
-        setError('Search failed. Please try again.')
+        const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`)
+        if (!res.ok) throw new Error(`Search failed: ${res.status}`)
+        const data = await res.json() as { videos: VideoResult[] }
+        setVideos(data.videos)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Search failed. Please try again.')
         setVideos([])
       } finally {
         setLoading(false)
@@ -57,9 +49,7 @@ export function useYouTubeSearch(query: string): UseYouTubeSearchReturn {
     }, 300)
 
     return () => {
-      if (debounceTimer.current) {
-        clearTimeout(debounceTimer.current)
-      }
+      if (debounceTimer.current) clearTimeout(debounceTimer.current)
     }
   }, [query])
 
