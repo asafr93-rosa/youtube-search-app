@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 
+*-player-script.js
 .env
 .env.local
 .env.production
