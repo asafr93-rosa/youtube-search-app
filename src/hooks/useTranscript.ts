@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 
 export type TranscriptState =
   | { status: 'idle' }
@@ -14,58 +14,23 @@ interface UseTranscriptReturn {
 
 export function useTranscript(): UseTranscriptReturn {
   const [state, setState] = useState<TranscriptState>({ status: 'idle' })
-  const workerRef = useRef<Worker | null>(null)
-
-  function getWorker(): Worker {
-    if (!workerRef.current) {
-      workerRef.current = new Worker(
-        new URL('../workers/whisper.worker.ts', import.meta.url),
-        { type: 'module' }
-      )
-    }
-    return workerRef.current
-  }
 
   const transcribe = useCallback(async (videoId: string) => {
-    setState({ status: 'loading', progress: 'Fetching audio…' })
-
-    let audioBuffer: ArrayBuffer
+    setState({ status: 'loading', progress: 'Fetching transcript…' })
     try {
-      const response = await fetch(`/api/audio?v=${encodeURIComponent(videoId)}`)
-      if (!response.ok) throw new Error(`Audio fetch failed: ${response.status}`)
-      audioBuffer = await response.arrayBuffer()
+      const res = await fetch(`/api/transcript?v=${encodeURIComponent(videoId)}`)
+      const data = await res.json() as { transcript?: string; error?: string }
+      if (!res.ok) throw new Error(data.error ?? `Request failed: ${res.status}`)
+      setState({ status: 'done', text: data.transcript ?? '' })
     } catch (err) {
       setState({
         status: 'error',
-        message: err instanceof Error ? err.message : 'Failed to fetch audio',
+        message: err instanceof Error ? err.message : 'Failed to fetch transcript',
       })
-      return
     }
-
-    const worker = getWorker()
-
-    // Remove previous listener before adding new one
-    worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data
-      if (msg.type === 'progress') {
-        setState({ status: 'loading', progress: msg.text })
-      } else if (msg.type === 'done') {
-        setState({ status: 'done', text: msg.transcript })
-      } else if (msg.type === 'error') {
-        setState({ status: 'error', message: msg.message })
-      }
-    }
-
-    worker.onerror = (e) => {
-      setState({ status: 'error', message: e.message ?? 'Worker error' })
-    }
-
-    worker.postMessage({ type: 'transcribe', audioBuffer }, [audioBuffer])
   }, [])
 
-  const reset = useCallback(() => {
-    setState({ status: 'idle' })
-  }, [])
+  const reset = useCallback(() => setState({ status: 'idle' }), [])
 
   return { state, transcribe, reset }
 }

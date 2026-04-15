@@ -6,10 +6,4 @@ import { audioProxyPlugin } from './vite-plugin-audio-proxy'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react(), tailwindcss(), audioProxyPlugin()],
-  optimizeDeps: {
-    exclude: ['@xenova/transformers'],
-  },
-  worker: {
-    format: 'es',
-  },
 })
