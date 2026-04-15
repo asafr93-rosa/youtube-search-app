@@ -73,6 +73,15 @@ export function TranscriptPanel({ videoTitle, state, onClose }: TranscriptPanelP
 
         {state.status === 'done' && (
           <div ref={textRef} className="flex-1 overflow-y-auto px-4 py-4">
+            <div className="flex items-center gap-1.5 mb-3">
+              <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                state.source === 'whisper'
+                  ? 'bg-green-500/15 text-green-400'
+                  : 'bg-[#272727] text-[#aaa]'
+              }`}>
+                {state.source === 'whisper' ? '✦ Whisper AI' : 'YouTube Captions'}
+              </span>
+            </div>
             <p className="text-[#e0e0e0] text-sm leading-7 whitespace-pre-wrap">{state.text}</p>
           </div>
         )}

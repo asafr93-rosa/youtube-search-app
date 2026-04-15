@@ -1,6 +1,7 @@
 import type { Plugin } from 'vite'
 import yts from 'yt-search'
 import type { IncomingMessage, ServerResponse } from 'http'
+import http from 'http'
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.83 Safari/537.36,gzip(gfe)'
@@ -113,6 +114,34 @@ export function audioProxyPlugin(): Plugin {
           res.writeHead(500, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ error: err instanceof Error ? err.message : 'Failed to fetch transcript' }))
         }
+      })
+      // /api/whisper?v=videoId — proxy to local Python server on :8000
+      server.middlewares.use('/api/whisper', (req: IncomingMessage, res: ServerResponse) => {
+        const url = new URL(req.url ?? '', 'http://localhost')
+        const videoId = url.searchParams.get('v')
+        if (!videoId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Missing video id' }))
+          return
+        }
+
+        const proxyReq = http.request(
+          { hostname: 'localhost', port: 8000, path: `/transcribe?v=${videoId}`, method: 'GET' },
+          (proxyRes) => {
+            res.writeHead(proxyRes.statusCode ?? 200, {
+              'Content-Type': 'application/json',
+              'Access-Control-Allow-Origin': '*',
+            })
+            proxyRes.pipe(res)
+          }
+        )
+        proxyReq.on('error', () => {
+          if (!res.headersSent) {
+            res.writeHead(503, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'Whisper server not running. Start it with: cd server && python main.py' }))
+          }
+        })
+        proxyReq.end()
       })
     },
   }
