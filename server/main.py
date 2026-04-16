@@ -46,10 +46,14 @@ def download_audio(video_id: str, tmpdir: str) -> str:
         url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    print(f"yt-dlp stdout: {result.stdout}")
+    print(f"yt-dlp stderr: {result.stderr}")
+    print(f"yt-dlp returncode: {result.returncode}")
     if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed: {result.stderr.strip()}")
+        raise RuntimeError(f"yt-dlp failed: {result.stderr.strip() or result.stdout.strip()}")
     # Find the downloaded file (extension varies: m4a, webm, etc.)
     files = list(Path(tmpdir).glob("audio.*"))
+    print(f"Downloaded files: {files}")
     if not files:
         raise RuntimeError("yt-dlp ran but no audio file was created")
     return str(files[0])
