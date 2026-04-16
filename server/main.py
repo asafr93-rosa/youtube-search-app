@@ -1,6 +1,6 @@
 """
 Local Whisper transcription server.
-Uses yt-dlp to download YouTube audio, then OpenAI Whisper to transcribe.
+Uses yt-dlp to download YouTube audio, then faster-whisper to transcribe.
 
 Usage:
     cd server
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-import whisper
+from faster_whisper import WhisperModel
 import uvicorn
 
 app = FastAPI(title="Whisper Transcription Server")
@@ -29,10 +29,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load model once at startup (tiny = ~150MB, fast; base = ~290MB, more accurate)
+# Load model once at startup (tiny = fast, base = more accurate)
 MODEL_SIZE = os.getenv("WHISPER_MODEL", "base")
 print(f"Loading Whisper model '{MODEL_SIZE}'... (first run downloads it)")
-model = whisper.load_model(MODEL_SIZE)
+model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
 print(f"Model '{MODEL_SIZE}' ready.")
 
 
@@ -44,7 +44,7 @@ def download_audio(video_id: str, output_path: str) -> None:
         "--no-playlist",
         "--extract-audio",
         "--audio-format", "mp3",
-        "--audio-quality", "9",          # lowest quality = smallest file = fastest
+        "--audio-quality", "9",
         "--output", output_path,
         "--no-progress",
         "--quiet",
@@ -61,7 +61,6 @@ async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, "audio.mp3")
 
-        # Download audio
         try:
             download_audio(v, audio_path)
         except RuntimeError as e:
@@ -72,10 +71,9 @@ async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
         if not Path(audio_path).exists():
             raise HTTPException(status_code=502, detail="Audio file not created by yt-dlp")
 
-        # Transcribe
         try:
-            result = model.transcribe(audio_path, fp16=False)
-            transcript = result["text"].strip()
+            segments, _ = model.transcribe(audio_path, beam_size=5)
+            transcript = " ".join(segment.text.strip() for segment in segments)
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Whisper error: {str(e)}")
 
