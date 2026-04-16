@@ -1,13 +1,9 @@
 """
 Whisper transcription server using Groq API.
-Uses yt-dlp + bgutil PO token plugin to download YouTube audio (bypasses bot detection),
-then Groq's hosted Whisper to transcribe.
-
-Usage:
-    cd server
-    python -m venv venv && source venv/bin/activate
-    pip install -r requirements.txt
-    GROQ_API_KEY=your_key python main.py
+Download strategy (in order):
+  1. yt-dlp + bgutil PO token plugin (web client)
+  2. Invidious proxy API (local=true routes audio through their servers, bypassing IP blocks)
+  3. Piped API fallback
 """
 
 import os
@@ -36,7 +32,6 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64")
 
-# Decode cookies at startup if provided
 COOKIES_PATH = None
 if YOUTUBE_COOKIES_B64:
     try:
@@ -48,16 +43,28 @@ if YOUTUBE_COOKIES_B64:
     except Exception as e:
         print(f"WARNING: Failed to decode YOUTUBE_COOKIES_B64: {e}")
 
+# Invidious instances — local=true proxies audio through their servers (not direct YouTube CDN)
+INVIDIOUS_INSTANCES = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://invidious.silkky.cloud",
+    "https://invidious.kavin.rocks",
+    "https://invidious-us.kavin.rocks",
+    "https://yewtu.be",
+    "https://ytb.trom.tf",
+    "https://invidious.privacydev.net",
+]
+
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://piped-api.garudalinux.org",
     "https://api.piped.yt",
-    "https://watchapi.whatever.social",
 ]
+
+HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
 
 def try_ytdlp(video_id: str, tmpdir: str) -> str:
-    """Download audio using yt-dlp with web client + bgutil PO token plugin."""
     url = f"https://www.youtube.com/watch?v={video_id}"
     output_template = os.path.join(tmpdir, "audio.%(ext)s")
     cmd = [
@@ -66,8 +73,7 @@ def try_ytdlp(video_id: str, tmpdir: str) -> str:
         "--format", "bestaudio/best",
         "--extractor-args", "youtube:player_client=web",
         "--output", output_template,
-        "--no-progress",
-        "--no-warnings",
+        "--no-progress", "--no-warnings",
         url,
     ]
     if COOKIES_PATH:
@@ -83,60 +89,97 @@ def try_ytdlp(video_id: str, tmpdir: str) -> str:
     return str(files[0])
 
 
-def try_piped(video_id: str, tmpdir: str) -> str:
-    """Fallback: download audio via Piped API instances."""
-    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-
-    for instance in PIPED_INSTANCES:
+def try_invidious(video_id: str, tmpdir: str) -> str:
+    """Download via Invidious proxy — audio routes through their servers, not YouTube CDN directly."""
+    for instance in INVIDIOUS_INSTANCES:
         try:
-            req = urllib.request.Request(f"{instance}/streams/{video_id}", headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            # local=true makes adaptiveFormats URLs proxy through the Invidious instance
+            req = urllib.request.Request(
+                f"{instance}/api/v1/videos/{video_id}?local=true",
+                headers=HEADERS,
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read())
 
-            audio_streams = data.get("audioStreams", [])
-            if not audio_streams:
+            adaptive = data.get("adaptiveFormats", [])
+            audio = [f for f in adaptive if "audio" in f.get("type", "")]
+            if not audio:
+                print(f"Invidious {instance}: no audio formats found")
                 continue
 
-            audio_streams.sort(key=lambda x: x.get("bitrate", 999999))
-            audio_url = audio_streams[0]["url"]
+            # Prefer m4a (itag 140) — widest Groq compatibility
+            m4a = [f for f in audio if f.get("itag") == 140]
+            chosen = (m4a or audio)[0]
+            audio_url = chosen.get("url")
+            if not audio_url:
+                continue
 
-            output_path = os.path.join(tmpdir, "audio.m4a")
-            dl_req = urllib.request.Request(audio_url, headers={
-                **headers,
-                "Referer": "https://www.youtube.com/",
-                "Origin": "https://www.youtube.com",
-            })
+            ext = "m4a" if chosen.get("itag") == 140 else "webm"
+            output_path = os.path.join(tmpdir, f"audio.{ext}")
+
+            dl_req = urllib.request.Request(audio_url, headers=HEADERS)
             with urllib.request.urlopen(dl_req, timeout=60) as resp2:
                 data_bytes = resp2.read()
 
-            if len(data_bytes) > 1000:
+            if len(data_bytes) > 10_000:
                 with open(output_path, "wb") as f:
                     f.write(data_bytes)
-                print(f"Piped download succeeded via {instance}")
+                print(f"Invidious succeeded via {instance} (itag={chosen.get('itag')}, {len(data_bytes)//1024}KB)")
                 return output_path
 
         except Exception as e:
-            print(f"Piped {instance} failed: {e}")
+            print(f"Invidious {instance} failed: {str(e)[:120]}")
+            continue
+
+    raise RuntimeError("All Invidious instances failed")
+
+
+def try_piped(video_id: str, tmpdir: str) -> str:
+    for instance in PIPED_INSTANCES:
+        try:
+            req = urllib.request.Request(f"{instance}/streams/{video_id}", headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+
+            streams = data.get("audioStreams", [])
+            if not streams:
+                continue
+
+            streams.sort(key=lambda x: x.get("bitrate", 999999))
+            audio_url = streams[0]["url"]
+            output_path = os.path.join(tmpdir, "audio.m4a")
+
+            dl_req = urllib.request.Request(audio_url, headers={**HEADERS, "Referer": "https://www.youtube.com/"})
+            with urllib.request.urlopen(dl_req, timeout=60) as resp2:
+                data_bytes = resp2.read()
+
+            if len(data_bytes) > 10_000:
+                with open(output_path, "wb") as f:
+                    f.write(data_bytes)
+                print(f"Piped succeeded via {instance}")
+                return output_path
+
+        except Exception as e:
+            print(f"Piped {instance} failed: {str(e)[:100]}")
             continue
 
     raise RuntimeError("All Piped instances failed")
 
 
 def download_audio(video_id: str, tmpdir: str) -> str:
-    """Download audio: try yt-dlp+bgutil first, then Piped fallback."""
-    try:
-        path = try_ytdlp(video_id, tmpdir)
-        print(f"yt-dlp succeeded for {video_id}")
-        return path
-    except Exception as e:
-        print(f"yt-dlp failed: {str(e)[:200]}")
+    for strategy_name, strategy_fn in [
+        ("yt-dlp+bgutil", lambda: try_ytdlp(video_id, tmpdir)),
+        ("invidious", lambda: try_invidious(video_id, tmpdir)),
+        ("piped", lambda: try_piped(video_id, tmpdir)),
+    ]:
+        try:
+            path = strategy_fn()
+            print(f"✓ {strategy_name} succeeded for {video_id}")
+            return path
+        except Exception as e:
+            print(f"✗ {strategy_name} failed: {str(e)[:150]}")
 
-    try:
-        return try_piped(video_id, tmpdir)
-    except Exception as e:
-        print(f"Piped failed: {str(e)[:200]}")
-
-    raise RuntimeError("All download strategies failed — yt-dlp (bgutil) and Piped both unavailable")
+    raise RuntimeError("All download strategies exhausted (yt-dlp, Invidious, Piped)")
 
 
 @app.get("/transcribe")
