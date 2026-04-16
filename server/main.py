@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import base64
 import tempfile
 import subprocess
 import sys
@@ -30,6 +31,21 @@ app.add_middleware(
 )
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64")
+
+# Write cookies to a persistent temp file at startup if provided
+COOKIES_PATH = None
+if YOUTUBE_COOKIES_B64:
+    try:
+        _cookies_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
+        _cookies_file.write(base64.b64decode(YOUTUBE_COOKIES_B64))
+        _cookies_file.close()
+        COOKIES_PATH = _cookies_file.name
+        print(f"YouTube cookies loaded from YOUTUBE_COOKIES_B64 → {COOKIES_PATH}")
+    except Exception as e:
+        print(f"WARNING: Failed to decode YOUTUBE_COOKIES_B64: {e}")
+else:
+    print("No YOUTUBE_COOKIES_B64 set — yt-dlp will run without cookies")
 
 
 def download_audio(video_id: str, tmpdir: str) -> str:
@@ -45,15 +61,14 @@ def download_audio(video_id: str, tmpdir: str) -> str:
         "--no-progress",
         url,
     ]
+    if COOKIES_PATH:
+        cmd += ["--cookies", COOKIES_PATH]
+
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-    print(f"yt-dlp stdout: {result.stdout}")
-    print(f"yt-dlp stderr: {result.stderr}")
-    print(f"yt-dlp returncode: {result.returncode}")
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp failed: {result.stderr.strip() or result.stdout.strip()}")
-    # Find the downloaded file (extension varies: m4a, webm, etc.)
+
     files = list(Path(tmpdir).glob("audio.*"))
-    print(f"Downloaded files: {files}")
     if not files:
         raise RuntimeError("yt-dlp ran but no audio file was created")
     return str(files[0])
@@ -89,7 +104,7 @@ async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": "whisper-large-v3-turbo (Groq)"}
+    return {"status": "ok", "model": "whisper-large-v3-turbo (Groq)", "cookies": bool(COOKIES_PATH)}
 
 
 if __name__ == "__main__":
