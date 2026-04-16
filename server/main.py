@@ -1,19 +1,16 @@
 """
 Whisper transcription server using Groq API.
-Uses yt-dlp to download YouTube audio, then Groq's Whisper API to transcribe.
-
-Usage:
-    cd server
-    python -m venv venv && source venv/bin/activate
-    pip install -r requirements.txt
-    GROQ_API_KEY=your_key python main.py
+Uses yt-dlp (multiple strategies) + Piped API fallback to download audio,
+then Groq's hosted Whisper to transcribe.
 """
 
 import os
 import base64
+import json
 import tempfile
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
@@ -33,50 +30,122 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 YOUTUBE_COOKIES_B64 = os.getenv("YOUTUBE_COOKIES_B64")
 
-# Write cookies to a persistent temp file at startup if provided
+# Decode cookies at startup if provided
 COOKIES_PATH = None
 if YOUTUBE_COOKIES_B64:
     try:
-        _cookies_file = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
-        _cookies_file.write(base64.b64decode(YOUTUBE_COOKIES_B64))
-        _cookies_file.close()
-        COOKIES_PATH = _cookies_file.name
-        print(f"YouTube cookies loaded from YOUTUBE_COOKIES_B64 → {COOKIES_PATH}")
+        _f = tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb")
+        _f.write(base64.b64decode(YOUTUBE_COOKIES_B64))
+        _f.close()
+        COOKIES_PATH = _f.name
+        print(f"YouTube cookies loaded → {COOKIES_PATH}")
     except Exception as e:
         print(f"WARNING: Failed to decode YOUTUBE_COOKIES_B64: {e}")
-else:
-    print("No YOUTUBE_COOKIES_B64 set — yt-dlp will run without cookies")
+
+# yt-dlp player clients to try in order
+YTDLP_CLIENTS = ["android", "ios", "tv_embedded", "web_embedded", "mweb"]
+
+# Piped API instances to try as last resort (alternative YouTube frontends)
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://piped-api.garudalinux.org",
+    "https://api.piped.yt",
+    "https://watchapi.whatever.social",
+]
 
 
-def download_audio(video_id: str, tmpdir: str) -> str:
-    """Download YouTube audio using yt-dlp. Returns path to downloaded file."""
+def try_ytdlp(video_id: str, tmpdir: str, client: str) -> str:
+    """Try downloading with a specific yt-dlp player client."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    output_template = os.path.join(tmpdir, "audio.%(ext)s")
+    output_template = os.path.join(tmpdir, f"{client}.%(ext)s")
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
         "--format", "worstaudio",
-        "--extractor-args", "youtube:player_client=android",
+        "--extractor-args", f"youtube:player_client={client}",
         "--output", output_template,
         "--no-progress",
+        "--no-warnings",
         url,
     ]
     if COOKIES_PATH:
         cmd += ["--cookies", COOKIES_PATH]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
     if result.returncode != 0:
-        raise RuntimeError(f"yt-dlp failed: {result.stderr.strip() or result.stdout.strip()}")
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "unknown error")
 
-    files = list(Path(tmpdir).glob("audio.*"))
+    files = list(Path(tmpdir).glob(f"{client}.*"))
     if not files:
-        raise RuntimeError("yt-dlp ran but no audio file was created")
+        raise RuntimeError("no file created")
     return str(files[0])
+
+
+def try_piped(video_id: str, tmpdir: str) -> str:
+    """Try downloading audio via Piped API instances."""
+    headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+
+    for instance in PIPED_INSTANCES:
+        try:
+            req = urllib.request.Request(f"{instance}/streams/{video_id}", headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+
+            audio_streams = data.get("audioStreams", [])
+            if not audio_streams:
+                continue
+
+            # Pick lowest bitrate (fastest download)
+            audio_streams.sort(key=lambda x: x.get("bitrate", 999999))
+            audio_url = audio_streams[0]["url"]
+
+            output_path = os.path.join(tmpdir, "piped.m4a")
+            dl_req = urllib.request.Request(audio_url, headers={
+                **headers,
+                "Referer": "https://www.youtube.com/",
+                "Origin": "https://www.youtube.com",
+            })
+            with urllib.request.urlopen(dl_req, timeout=60) as resp2:
+                data_bytes = resp2.read()
+
+            if len(data_bytes) > 1000:
+                with open(output_path, "wb") as f:
+                    f.write(data_bytes)
+                print(f"Piped download succeeded via {instance}")
+                return output_path
+
+        except Exception as e:
+            print(f"Piped {instance} failed: {e}")
+            continue
+
+    raise RuntimeError("All Piped instances failed")
+
+
+def download_audio(video_id: str, tmpdir: str) -> str:
+    """Download audio using all available strategies."""
+    errors = []
+
+    # Strategy 1: yt-dlp with multiple player clients
+    for client in YTDLP_CLIENTS:
+        try:
+            path = try_ytdlp(video_id, tmpdir, client)
+            print(f"yt-dlp succeeded with client={client}")
+            return path
+        except Exception as e:
+            print(f"yt-dlp client={client} failed: {str(e)[:120]}")
+            errors.append(f"ytdlp[{client}]: {str(e)[:80]}")
+
+    # Strategy 2: Piped API (completely different infrastructure)
+    try:
+        return try_piped(video_id, tmpdir)
+    except Exception as e:
+        errors.append(f"piped: {str(e)[:80]}")
+
+    raise RuntimeError("All download strategies failed. " + " | ".join(errors))
 
 
 @app.get("/transcribe")
 async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
-    """Transcribe a YouTube video by video ID."""
     if not GROQ_API_KEY:
         raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
 
