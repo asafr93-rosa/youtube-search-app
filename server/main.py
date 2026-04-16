@@ -1,12 +1,12 @@
 """
-Local Whisper transcription server.
-Uses yt-dlp to download YouTube audio, then faster-whisper to transcribe.
+Whisper transcription server using Groq API.
+Uses yt-dlp to download YouTube audio, then Groq's Whisper API to transcribe.
 
 Usage:
     cd server
     python -m venv venv && source venv/bin/activate
     pip install -r requirements.txt
-    python main.py
+    GROQ_API_KEY=your_key python main.py
 """
 
 import os
@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from faster_whisper import WhisperModel
+from groq import Groq
 import uvicorn
 
 app = FastAPI(title="Whisper Transcription Server")
@@ -29,11 +29,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Load model once at startup (tiny = fast, base = more accurate)
-MODEL_SIZE = os.getenv("WHISPER_MODEL", "base")
-print(f"Loading Whisper model '{MODEL_SIZE}'... (first run downloads it)")
-model = WhisperModel(MODEL_SIZE, device="cpu", compute_type="int8")
-print(f"Model '{MODEL_SIZE}' ready.")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
 def download_audio(video_id: str, output_path: str) -> None:
@@ -58,6 +54,9 @@ def download_audio(video_id: str, output_path: str) -> None:
 @app.get("/transcribe")
 async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
     """Transcribe a YouTube video by video ID."""
+    if not GROQ_API_KEY:
+        raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
+
     with tempfile.TemporaryDirectory() as tmpdir:
         audio_path = os.path.join(tmpdir, "audio.mp3")
 
@@ -72,17 +71,22 @@ async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
             raise HTTPException(status_code=502, detail="Audio file not created by yt-dlp")
 
         try:
-            segments, _ = model.transcribe(audio_path, beam_size=5)
-            transcript = " ".join(segment.text.strip() for segment in segments)
+            client = Groq(api_key=GROQ_API_KEY)
+            with open(audio_path, "rb") as audio_file:
+                transcription = client.audio.transcriptions.create(
+                    file=(os.path.basename(audio_path), audio_file.read()),
+                    model="whisper-large-v3-turbo",
+                )
+            transcript = transcription.text
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Whisper error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Groq Whisper error: {str(e)}")
 
     return {"transcript": transcript}
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "model": MODEL_SIZE}
+    return {"status": "ok", "model": "whisper-large-v3-turbo (Groq)"}
 
 
 if __name__ == "__main__":
