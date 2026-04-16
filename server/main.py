@@ -1,7 +1,13 @@
 """
 Whisper transcription server using Groq API.
-Uses yt-dlp (multiple strategies) + Piped API fallback to download audio,
+Uses yt-dlp + bgutil PO token plugin to download YouTube audio (bypasses bot detection),
 then Groq's hosted Whisper to transcribe.
+
+Usage:
+    cd server
+    python -m venv venv && source venv/bin/activate
+    pip install -r requirements.txt
+    GROQ_API_KEY=your_key python main.py
 """
 
 import os
@@ -42,10 +48,6 @@ if YOUTUBE_COOKIES_B64:
     except Exception as e:
         print(f"WARNING: Failed to decode YOUTUBE_COOKIES_B64: {e}")
 
-# yt-dlp player clients to try in order
-YTDLP_CLIENTS = ["android", "ios", "tv_embedded", "web_embedded", "mweb"]
-
-# Piped API instances to try as last resort (alternative YouTube frontends)
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
     "https://piped-api.garudalinux.org",
@@ -54,15 +56,15 @@ PIPED_INSTANCES = [
 ]
 
 
-def try_ytdlp(video_id: str, tmpdir: str, client: str) -> str:
-    """Try downloading with a specific yt-dlp player client."""
+def try_ytdlp(video_id: str, tmpdir: str) -> str:
+    """Download audio using yt-dlp with web client + bgutil PO token plugin."""
     url = f"https://www.youtube.com/watch?v={video_id}"
-    output_template = os.path.join(tmpdir, f"{client}.%(ext)s")
+    output_template = os.path.join(tmpdir, "audio.%(ext)s")
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
         "--format", "worstaudio",
-        "--extractor-args", f"youtube:player_client={client}",
+        "--extractor-args", "youtube:player_client=web",
         "--output", output_template,
         "--no-progress",
         "--no-warnings",
@@ -75,14 +77,14 @@ def try_ytdlp(video_id: str, tmpdir: str, client: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "unknown error")
 
-    files = list(Path(tmpdir).glob(f"{client}.*"))
+    files = list(Path(tmpdir).glob("audio.*"))
     if not files:
         raise RuntimeError("no file created")
     return str(files[0])
 
 
 def try_piped(video_id: str, tmpdir: str) -> str:
-    """Try downloading audio via Piped API instances."""
+    """Fallback: download audio via Piped API instances."""
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
 
     for instance in PIPED_INSTANCES:
@@ -95,11 +97,10 @@ def try_piped(video_id: str, tmpdir: str) -> str:
             if not audio_streams:
                 continue
 
-            # Pick lowest bitrate (fastest download)
             audio_streams.sort(key=lambda x: x.get("bitrate", 999999))
             audio_url = audio_streams[0]["url"]
 
-            output_path = os.path.join(tmpdir, "piped.m4a")
+            output_path = os.path.join(tmpdir, "audio.m4a")
             dl_req = urllib.request.Request(audio_url, headers={
                 **headers,
                 "Referer": "https://www.youtube.com/",
@@ -122,26 +123,20 @@ def try_piped(video_id: str, tmpdir: str) -> str:
 
 
 def download_audio(video_id: str, tmpdir: str) -> str:
-    """Download audio using all available strategies."""
-    errors = []
+    """Download audio: try yt-dlp+bgutil first, then Piped fallback."""
+    try:
+        path = try_ytdlp(video_id, tmpdir)
+        print(f"yt-dlp succeeded for {video_id}")
+        return path
+    except Exception as e:
+        print(f"yt-dlp failed: {str(e)[:200]}")
 
-    # Strategy 1: yt-dlp with multiple player clients
-    for client in YTDLP_CLIENTS:
-        try:
-            path = try_ytdlp(video_id, tmpdir, client)
-            print(f"yt-dlp succeeded with client={client}")
-            return path
-        except Exception as e:
-            print(f"yt-dlp client={client} failed: {str(e)[:120]}")
-            errors.append(f"ytdlp[{client}]: {str(e)[:80]}")
-
-    # Strategy 2: Piped API (completely different infrastructure)
     try:
         return try_piped(video_id, tmpdir)
     except Exception as e:
-        errors.append(f"piped: {str(e)[:80]}")
+        print(f"Piped failed: {str(e)[:200]}")
 
-    raise RuntimeError("All download strategies failed. " + " | ".join(errors))
+    raise RuntimeError("All download strategies failed — yt-dlp (bgutil) and Piped both unavailable")
 
 
 @app.get("/transcribe")
