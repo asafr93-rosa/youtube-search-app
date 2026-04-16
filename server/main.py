@@ -32,16 +32,15 @@ app.add_middleware(
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 
-def download_audio(video_id: str, output_path: str) -> None:
-    """Download YouTube audio to output_path using yt-dlp."""
+def download_audio(video_id: str, tmpdir: str) -> str:
+    """Download YouTube audio using yt-dlp. Returns path to downloaded file."""
     url = f"https://www.youtube.com/watch?v={video_id}"
+    output_template = os.path.join(tmpdir, "audio.%(ext)s")
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
-        "--extract-audio",
-        "--audio-format", "mp3",
-        "--audio-quality", "9",
-        "--output", output_path,
+        "--format", "worstaudio",   # no ffmpeg needed — download native format
+        "--output", output_template,
         "--no-progress",
         "--quiet",
         url,
@@ -49,6 +48,11 @@ def download_audio(video_id: str, output_path: str) -> None:
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp failed: {result.stderr.strip()}")
+    # Find the downloaded file (extension varies: m4a, webm, etc.)
+    files = list(Path(tmpdir).glob("audio.*"))
+    if not files:
+        raise RuntimeError("yt-dlp ran but no audio file was created")
+    return str(files[0])
 
 
 @app.get("/transcribe")
@@ -58,17 +62,12 @@ async def transcribe(v: str = Query(..., min_length=11, max_length=11)):
         raise HTTPException(status_code=503, detail="GROQ_API_KEY not configured")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        audio_path = os.path.join(tmpdir, "audio.mp3")
-
         try:
-            download_audio(v, audio_path)
+            audio_path = download_audio(v, tmpdir)
         except RuntimeError as e:
             raise HTTPException(status_code=502, detail=str(e))
         except subprocess.TimeoutExpired:
             raise HTTPException(status_code=504, detail="Audio download timed out")
-
-        if not Path(audio_path).exists():
-            raise HTTPException(status_code=502, detail="Audio file not created by yt-dlp")
 
         try:
             client = Groq(api_key=GROQ_API_KEY)
