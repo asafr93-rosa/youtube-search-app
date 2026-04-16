@@ -34,7 +34,7 @@ export function useTranscript(): UseTranscriptReturn {
       const msg = err instanceof Error ? err.message : ''
       // 503 = server not running, fall through to captions
       // Any other error = also fall through (don't block the user)
-      if (!msg.includes('not running') && !msg.includes('503') && !msg.includes('fetch')) {
+      if (!msg.includes('not running') && !msg.includes('503') && !msg.includes('fetch') && !msg.includes('not configured')) {
         setState({ status: 'error', message: msg })
         return
       }
