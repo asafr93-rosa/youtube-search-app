@@ -63,7 +63,7 @@ def try_ytdlp(video_id: str, tmpdir: str) -> str:
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
-        "--format", "worstaudio",
+        "--format", "bestaudio/best",
         "--extractor-args", "youtube:player_client=web",
         "--output", output_template,
         "--no-progress",
