@@ -39,10 +39,10 @@ def download_audio(video_id: str, tmpdir: str) -> str:
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-playlist",
-        "--format", "worstaudio",   # no ffmpeg needed — download native format
+        "--format", "worstaudio",
+        "--extractor-args", "youtube:player_client=android",
         "--output", output_template,
         "--no-progress",
-        "--quiet",
         url,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
