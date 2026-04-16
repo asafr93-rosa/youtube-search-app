@@ -25,23 +25,17 @@ export function useTranscript(): UseTranscriptReturn {
   const transcribe = useCallback(async (videoId: string) => {
     setState({ status: 'loading', progress: 'Connecting to Whisper…' })
 
-    // 1. Try local Whisper server
+    // 1. Try Whisper server — always fall back to captions on any failure
     try {
       const data = await fetchJson(`/api/whisper?v=${encodeURIComponent(videoId)}`)
       setState({ status: 'done', text: data.transcript ?? '', source: 'whisper' })
       return
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : ''
-      // 503 = server not running, fall through to captions
-      // Any other error = also fall through (don't block the user)
-      if (!msg.includes('not running') && !msg.includes('503') && !msg.includes('fetch') && !msg.includes('not configured')) {
-        setState({ status: 'error', message: msg })
-        return
-      }
+    } catch {
+      // Whisper unavailable or failed — fall through to captions silently
     }
 
     // 2. Fall back to YouTube auto-captions
-    setState({ status: 'loading', progress: 'Whisper server not running — fetching YouTube captions…' })
+    setState({ status: 'loading', progress: 'Fetching YouTube captions…' })
     try {
       const data = await fetchJson(`/api/transcript?v=${encodeURIComponent(videoId)}`)
       setState({ status: 'done', text: data.transcript ?? '', source: 'captions' })
